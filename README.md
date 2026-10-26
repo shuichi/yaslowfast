@@ -14,15 +14,20 @@ PyTorchVideo由来部分の著作権表示と変更内容は[THIRD_PARTY_NOTICES
 
 ## 最短手順（H100 × 8、1ノード）
 
-下記の「環境の準備」を済ませ、仮想環境を有効にした状態で、リポジトリ直下から実行します。`manifests/videos.jsonl`を実際の入力manifestに置き換えてください。出力先の`data`は未作成または空にします。
+下記の「環境の準備」を済ませ、仮想環境を有効にした状態で、リポジトリ直下から実行します。positive・negativeそれぞれの動画を格納したtarを用意し、入力パスを置き換えてください。出力先の`datasets/20261026`は未作成または空にします。
 
 ```sh
-yaslowfast-prepare --manifest manifests/videos.jsonl --output data
+yaslowfast-prepare \
+  --positive data/positive_sample.tar --negative data/negative_sample.tar \
+  --output datasets/20261026
 
 torchrun --standalone --nnodes=1 --nproc-per-node=8 \
   -m yaslowfast.train --config configs/slowfast_r50.yaml \
+  --dataset datasets/20261026/dataset.json \
   --output-dir runs/h100x8 --device cuda
 ```
+
+splitと入力動画のmanifestは前処理で自動生成します。`data/`のサンプルtarは各クラス1動画のため、生成結果はtrainのみです。このサンプルで前処理・検査は実行できますが、上の学習には空でないvalも必要です。既定の分割では各クラス2動画以上、testも用意する場合は各クラス3動画以上を用意してください。
 
 mean/stdは前処理で自動計算され、学習時に自動適用されます。標準設定はGPUあたりバッチ8・worker 8（8GPU全体ではバッチ64・worker 64）、精度は自動選択でBF16、196 epochです。チェックポイントと学習ログは`runs/h100x8`に保存されます。
 
@@ -82,7 +87,83 @@ source .venv/bin/activate
 
 必要に応じて`--extra export`も追加してください。FFmpegの準備やGPU環境の設定は「環境の準備」を参照してください。データセットと学習済みモデルは別途用意します。
 
-## 入力manifest
+## 入力tarと自動split
+
+`--positive`と`--negative`に、それぞれのクラスの動画を格納したtarを指定します。tar直下・サブディレクトリ内の動画を収集し、クラスIDは`positive=0, negative=1`に固定します。`group_id`の指定は不要で、新しい出力にも含めません。入力tarは変更しません。
+
+動画拡張子は`.mp4`、`.avi`、`.mov`、`.mkv`、`.webm`、`.m4v`、`.mpg`、`.mpeg`、`.mts`、`.m2ts`、`.ts`、`.wmv`、`.flv`に対応します。ディレクトリ、macOSの補助ファイル、動画以外のファイルは読み飛ばします。各tarに動画が1本以上必要です。不正なパス、リンク・特殊ファイル、同じメンバー名の重複は拒否します。
+
+フレーム抽出・窓生成の前に、positive・negativeそれぞれを元動画単位でtrain／val／testへ割り当てます。既定の比率は80/10/10です。同じ動画から作る窓はすべて同じsplitに入ります。動画内容のhashを使うため、同じ入力動画と`--seed`なら、tar内の格納順やtarの保存先に依存せず同じsplitになります。必要なら`--split-ratios 0.8 0.1 0.1`で比率を変更できます。
+
+既定比率で動画が少ない場合はtrainを優先し、次のように割り当てます。3動画以上でも、少数時には80/10/10と厳密には一致しません。
+
+| 各クラスの動画数 | そのクラスの割り当て |
+|---|---|
+| 1本 | trainのみ |
+| 2本 | train・valに1本ずつ |
+| 3本以上 | train・val・testに最低1本ずつ確保し、比率に近づける |
+
+valが空でも前処理は完了し、現在の学習処理にはvalが必要な旨を表示します。学習にはtrainが両クラスを含み、valが空でないことが必要です。各splitの件数とクラス別件数は`dataset.json`に保存します。
+
+tarをまたぐ場合を含め、内容hashが同じ動画は重複として拒否します。別の内容の動画に登場する同一人物や同一撮影セッションのまとまりは、自動では識別しません。
+
+## 動画をWebDatasetへ変換
+
+```sh
+yaslowfast-prepare \
+  --positive data/positive_sample.tar --negative data/negative_sample.tar \
+  --output datasets/20261026 \
+  --fps 15 \
+  --short-side 320 \
+  --window-frames 64 \
+  --window-stride 32 \
+  --jpeg-quality 95 \
+  --shard-size-mb 512 \
+  --seed 42
+
+yaslowfast-prepare --verify datasets/20261026/dataset.json
+```
+
+`--output`で指定したディレクトリをそのまま使用し、日付ディレクトリを追加で作ることはありません。既存のファイルがある出力ディレクトリは上書きしません。読めない動画は既定で処理を中断し、`errors.json`へ記録します。デコードできない動画を除外して続ける場合に限り`--skip-errors`を指定します。tar内の不正な構造や内容が重複する動画は、この指定でも拒否します。除外の結果、データセットに1クラスしか残らない場合は完成データとして公開しません。shardへの書き込み失敗は、部分的な動画を公開しないよう常に中断します。
+
+FFmpegで時刻を0起点に揃えてからfps変換するため、可変フレームレートの入力も秒単位でサンプリングします。fps変換で失った細かな動きは学習時に復元できません。素早い動きを扱う場合は保存fpsと入力フレーム数を合わせて検討してください。保存画像は縦横比を維持して短辺を320pxへresizeします。`jpeg-quality`は1〜100をFFmpeg MJPEGのqscale 31〜2へ対応付ける値です。
+
+既定では、15 fpsの64フレームを1窓とし、32フレームずつずらして保存します。動画末尾は最後のフレームで終わる窓を追加し、同じ末尾窓を二重生成しません。短い動画は保存時に末尾を反復しますが、`valid_frames`に実フレーム数を記録します。学習・評価時は実フレーム部分から時間切り出しを行ってから不足分を反復し、短い動きが静止フレームだけにならないようにします。
+
+```text
+datasets/20261026/
+  manifest.jsonl
+  dataset.json
+  errors.json
+  train-000000.tar
+  val-000000.tar
+  test-000000.tar
+
+# 1つのtarに、以下のまとまりを多数格納
+<video-id>_<window-id>.json
+<video-id>_<window-id>.000000.jpg
+<video-id>_<window-id>.000001.jpg
+...
+```
+
+`manifest.jsonl`は動画ごとの出典と割り当てを記録する自動生成ファイルです。`source_archive`（入力tarの絶対パス）、`source_member`（tar内のパス）、`sha256`、`video_id`、`label`、`class_id`、`split`を保存し、一時展開先のパスは残しません。これは処理の追跡用で、従来の`--manifest`への入力形式とは異なります。
+
+`dataset.json`には`task: "binary_classification"`、`num_classes: 2`、クラス対応、前処理設定、動画と窓の件数、shardサイズ、SHA-256を保存します。train splitがある場合は、学習用フレームから計算したRGBのmean/stdも`normalization`に保存します。上の例のクラス対応は`{"positive": 0, "negative": 1}`です。以前に作成した2クラスのschema version 1データセットも読み込めます。
+
+空のsplitにはtarを生成しません。tarは非圧縮で、1窓を途中で分割しません。512 MiBは目安で、tarのpaddingや1窓のサイズによって超える場合があります。重なる窓ではJPEGを重複保存するため、strideを小さくすると保存量も増えます。tarは一括展開せず、動画1本ずつ処理します。動画1本分の元ファイルと抽出JPEGを置く一時ディスク領域が必要です。これらの一時ファイルは各動画の処理後に削除します。
+
+完成前には`.incomplete`マーカーを残し、全shardの作成とRGB統計の計算を終えてから`dataset.json`を公開します。マーカーがあるデータセットは学習できません。`--verify`は全shardのサイズ・hash・サンプル件数・クラス対応・全JPEGのデコードを確認します。現在の読み込み対象はローカルまたは共有ファイルシステム上のtarです。
+
+## 従来のmanifest入力（互換用）
+
+個別の動画ファイルを指定する従来の入力方式も使用できます。tar入力とは同時指定できません。`--video-root`と`--class-names`はこの方式専用です。
+
+```sh
+yaslowfast-prepare \
+  --manifest manifests/videos.jsonl \
+  --class-names positive negative \
+  --output datasets/legacy
+```
 
 JSON配列、JSONL、タブ区切りの`.tsv`／`.txt`に対応します。必須項目は`video`と`label`です。クラス名は任意の文字列ですが、manifest全体で厳密に2種類必要です。既定ではクラス名のソート順でIDを0・1に割り当てます。`--class-names CLASS_0 CLASS_1`を指定すると、その順序を使用します。対応表は`dataset.json`とチェックポイントに保存されます。
 
@@ -104,54 +185,9 @@ JSON形式なら、このレコードを配列にします。TSVは`video`, `lab
 
 指定済みのsplitは維持します。未指定の動画は、動画／group単位でラベル集合を考慮して分割します。既定の比率は80/10/10で、小さいグループ集合では比率が厳密に一致しない場合があります。同じgroupの一部にsplitがあれば、残りにもそのsplitを適用します。
 
-分割はフレーム抽出・窓生成より先に行います。同一パスの重複、同じgroupのsplit跨ぎ、内容hashが同じ動画の重複は拒否します。内容が異なる同一人物の動画は自動では判別できないため、必要な`group_id`を入力してください。学習には厳密に2クラスと、空でないtrain・val splitが必要です。両クラスの学習例がtrainに含まれることも検査します。val／testの個々のsplitは1クラスだけでも評価できますが、データセット全体のクラス対応は必ず2クラスです。
+この方式に限り、既存の`group_id`指定を引き続き受け付けます。分割はフレーム抽出・窓生成より先に行います。同一パスの重複、同じgroupのsplit跨ぎ、内容hashが同じ動画の重複は拒否します。内容が異なる同一人物の動画は自動では判別できないため、必要な`group_id`を入力してください。学習には厳密に2クラスと、空でないtrain・val splitが必要です。両クラスの学習例がtrainに含まれることも検査します。val／testの個々のsplitは1クラスだけでも評価できますが、データセット全体のクラス対応は必ず2クラスです。
 
-## 動画をWebDatasetへ変換
-
-```sh
-yaslowfast-prepare \
-  --manifest manifests/videos.jsonl \
-  --output data \
-  --class-names positive negative \
-  --fps 15 \
-  --short-side 320 \
-  --window-frames 64 \
-  --window-stride 32 \
-  --jpeg-quality 95 \
-  --shard-size-mb 512 \
-  --seed 42
-
-yaslowfast-prepare --verify data/dataset.json
-```
-
-上の例では`positive`を0、`negative`を1に割り当てます。互換モードで既存アプリへ渡す用途では、学習時からID 0を本物、ID 1を偽物に固定してください。この例は`positive`が本物、`negative`が偽物を表す前提です。ラベル名自体は任意なので、別の名前を使う場合もmanifestと`--class-names`を対応させ、「本物のラベル、偽物のラベル」の順に指定します。一般の二値分類では、それぞれの用途に合わせたクラス順を使用できます。1クラスまたは3クラス以上のmanifest、重複するクラス名、manifestにない名前の指定は拒否します。`--class-names`を省略するとソート順になるため、互換モード用のデータでは順序を明示してください。
-
-必要なら`--video-root /path/to/video/root`と`--split-ratios 0.8 0.1 0.1`を指定できます。既存のファイルがある出力ディレクトリは上書きしません。読めない動画は既定で処理を中断し、`errors.json`へ記録します。除外して続ける場合に限り`--skip-errors`を指定します。除外の結果、データセットに1クラスしか残らない場合は完成データとして公開しません。shardへの書き込み失敗は、部分的な動画を公開しないよう常に中断します。
-
-FFmpegで時刻を0起点に揃えてからfps変換するため、可変フレームレートの入力も秒単位でサンプリングします。fps変換で失った細かな動きは学習時に復元できません。素早い動きを扱う場合は保存fpsと入力フレーム数を合わせて検討してください。保存画像は縦横比を維持して短辺を320pxへresizeします。`jpeg-quality`は1〜100をFFmpeg MJPEGのqscale 31〜2へ対応付ける値です。
-
-既定では、15 fpsの64フレームを1窓とし、32フレームずつずらして保存します。動画末尾は最後のフレームで終わる窓を追加し、同じ末尾窓を二重生成しません。短い動画は保存時に末尾を反復しますが、`valid_frames`に実フレーム数を記録します。学習・評価時は実フレーム部分から時間切り出しを行ってから不足分を反復し、短い動きが静止フレームだけにならないようにします。
-
-```text
-data/
-  dataset.json
-  errors.json
-  train-000000.tar
-  val-000000.tar
-  test-000000.tar
-
-# 1つのtarに、以下のまとまりを多数格納
-<video-id>_<window-id>.json
-<video-id>_<window-id>.000000.jpg
-<video-id>_<window-id>.000001.jpg
-...
-```
-
-`dataset.json`には`task: "binary_classification"`、`num_classes: 2`、クラス対応、前処理設定、動画と窓の件数、shardサイズ、SHA-256を保存します。train splitがある場合は、学習用フレームから計算したRGBのmean/stdも`normalization`に保存します。上の例のクラス対応は`{"positive": 0, "negative": 1}`です。以前に作成した2クラスのschema version 1データセットも読み込めます。
-
-空のsplitにはtarを生成しません。tarは非圧縮で、1窓を途中で分割しません。512 MiBは目安で、tarのpaddingや1窓のサイズによって超える場合があります。重なる窓ではJPEGを重複保存するため、strideを小さくすると保存量も増えます。前処理には動画1本分の抽出JPEGを置く一時ディスク領域が必要です。
-
-完成前には`.incomplete`マーカーを残し、全shardの作成とRGB統計の計算を終えてから`dataset.json`を公開します。マーカーがあるデータセットは学習できません。`--verify`は全shardのサイズ・hash・サンプル件数・クラス対応・全JPEGのデコードを確認します。現在の読み込み対象はローカルまたは共有ファイルシステム上のtarです。
+互換モードで既存アプリへ渡す用途では、ID 0を本物、ID 1を偽物に対応させて学習してください。上の例は`positive`が本物、`negative`が偽物を表す前提です。任意のクラス名を使う場合も、`--class-names`には「本物のラベル、偽物のラベル」の順に指定します。省略時は名前のソート順となり、`negative=0, positive=1`になります。1クラスまたは3クラス以上のmanifest、重複するクラス名、manifestにない名前の指定は拒否します。
 
 ## RGB正規化
 
@@ -162,7 +198,7 @@ data/
 統計情報がない既存データセットを`auto`で使う場合は、警告を出してYAMLの`data.mean`／`data.std`を使用します。これらも未指定ならmean=`[0.45,0.45,0.45]`、std=`[0.225,0.225,0.225]`を使います。既存データでも独自統計を使いたい場合は、新しい出力先へデータ変換をやり直すか、次のコマンドで統計を計算してください。
 
 ```sh
-yaslowfast-stats --dataset data/dataset.json --output normalization.json
+yaslowfast-stats --dataset datasets/20261026/dataset.json --output normalization.json
 ```
 
 `yaslowfast-stats`は統計確認や手動設定用の独立したコマンドです。`dataset.json`や学習YAMLは変更しません。結果を手動で適用する場合は、YAMLの`data.normalization`を`config`にして、`data.mean`／`data.std`に計算結果を設定します。`auto`ではデータセットに保存された統計がYAMLのmean/stdより優先されます。例えば、固定値を明示的に使う設定は次のとおりです。
@@ -205,12 +241,14 @@ Slow入力はFast入力から`linspace(0,T-1,T/4).long()`で選択します。32
 
 ## 単一GPU・DDP学習
 
+設定ファイルの既定パスは`data/dataset.json`です。以下では`--dataset`で今回の出力先に変更します。
+
 単一GPU:
 
 ```sh
 yaslowfast-train \
   --config configs/slowfast_r50.yaml \
-  --dataset data/dataset.json \
+  --dataset datasets/20261026/dataset.json \
   --output-dir runs/experiment01 \
   --device cuda
 ```
@@ -221,7 +259,7 @@ yaslowfast-train \
 torchrun --standalone --nnodes=1 --nproc-per-node=4 \
   -m yaslowfast.train \
   --config configs/slowfast_r50.yaml \
-  --dataset data/dataset.json \
+  --dataset datasets/20261026/dataset.json \
   --output-dir runs/experiment01 \
   --device cuda
 ```
@@ -235,7 +273,7 @@ torchrun --nnodes=2 --nproc-per-node=4 \
   --master-addr=192.0.2.10 --master-port=29500 \
   -m yaslowfast.train \
   --config configs/slowfast_r50.yaml \
-  --dataset data/dataset.json \
+  --dataset datasets/20261026/dataset.json \
   --output-dir runs/experiment01 \
   --device cuda
 ```
@@ -287,7 +325,7 @@ epoch途中で停止した場合は、最後に保存されたepochの続きか�
 ```sh
 yaslowfast-train \
   --config configs/slowfast_r50.yaml \
-  --dataset data/dataset.json \
+  --dataset datasets/20261026/dataset.json \
   --output-dir runs/experiment01 \
   --device cuda \
   --resume runs/experiment01/latest.pt
@@ -299,6 +337,7 @@ yaslowfast-train \
 
 ```sh
 yaslowfast-train --config configs/slowfast_r50.yaml \
+  --dataset datasets/20261026/dataset.json \
   --output-dir runs/experiment01 --device cuda --stop-after-epoch 10
 ```
 
@@ -313,7 +352,7 @@ WebDatasetの評価:
 ```sh
 yaslowfast-evaluate \
   --checkpoint runs/experiment01/best.pt \
-  --dataset data/dataset.json \
+  --dataset datasets/20261026/dataset.json \
   --split test \
   --device cuda \
   --output results/test.json
@@ -410,15 +449,15 @@ SlowFast-R50はConv3dを使う約3,365万パラメータの二値分類モデル
 
 ## CPUでの接続確認とテスト
 
-[configs/smoke.yaml](configs/smoke.yaml)は、8フレーム・32px・細いチャネル・各段1ブロックの小さいモデルです。前処理から学習までの接続確認専用で、SlowFast-R50の学習レシピや性能測定の代わりにはなりません。標準設定で作成したデータも読み込めます。
+[configs/smoke.yaml](configs/smoke.yaml)は、8フレーム・32px・細いチャネル・各段1ブロックの小さいモデルです。前処理から学習までの接続確認専用で、SlowFast-R50の学習レシピや性能測定の代わりにはなりません。標準設定で作成したデータも読み込めます。以下の学習例には、trainに両クラス、valに1動画以上を含むデータセットを使用してください。
 
 ```sh
 yaslowfast-train --config configs/smoke.yaml \
-  --dataset data/dataset.json --output-dir runs/smoke --num-threads 1
+  --dataset datasets/20261026/dataset.json --output-dir runs/smoke --num-threads 1
 
 torchrun --nnodes=1 --nproc-per-node=2 \
   --master-addr=127.0.0.1 --master-port=29501 -m yaslowfast.train \
-  --config configs/smoke.yaml --dataset data/dataset.json \
+  --config configs/smoke.yaml --dataset datasets/20261026/dataset.json \
   --output-dir runs/smoke-ddp --device cpu --num-threads 1
 
 pytest -q
@@ -426,7 +465,7 @@ ruff check src tests tools
 ruff format --check src tests tools
 ```
 
-テストは、実FFmpeg動画の前処理、shard検査、短尺padding、複数workerの評価分配、rank別サンプリング、モデル初期化と勾配、動画単位の指標、分散評価、checkpoint／schedule／RNGの復元、exportなどを対象にしています。ONNXテストにはexport extra、動画テストにはFFmpegが必要です。プロセスや通信を制限したsandboxでは、DataLoader共有メモリやGlooのローカル通信に実行許可が必要な場合があります。
+テストは、tar入力とmanifest自動生成、splitの再現性と少数動画の割り当て、不正tar・重複動画の拒否、実FFmpeg動画の前処理、shard検査、短尺padding、複数workerの評価分配、rank別サンプリング、モデル初期化と勾配、動画単位の指標、分散評価、checkpoint／schedule／RNGの復元、exportなどを対象にしています。ONNXテストにはexport extra、動画テストにはFFmpegが必要です。プロセスや通信を制限したsandboxでは、DataLoader共有メモリやGlooのローカル通信に実行許可が必要な場合があります。
 
 macOSでは`torchrun --standalone`がホスト名の解決によって起動待ちになる場合があるため、上のCPU例ではloopbackアドレスを明示しています。Glooのインターフェース選択で問題が出る場合は、macOS上でコマンドの前に`GLOO_SOCKET_IFNAME=lo0`を指定してください。Linuxでは実際のインターフェース名を使用します。
 
@@ -460,7 +499,7 @@ CPUテスト中に、利用可能なアクセラレーターによって`pin_mem
 
 | ファイル | 役割 |
 |---|---|
-| `src/yaslowfast/prepare.py` | manifest、動画分割、JPEG化、tar作成、RGB統計の自動計算、検査 |
+| `src/yaslowfast/prepare.py` | tar入力・manifest自動生成、動画分割、JPEG化、tar作成、RGB統計の自動計算、検査 |
 | `src/yaslowfast/data.py` | WebDatasetストリーム、augmentation、DataLoader |
 | `src/yaslowfast/models.py` | 純PyTorchのSlowFast-R50とpathway生成 |
 | `src/yaslowfast/train.py` | DDP、AMP、勾配蓄積、学習・検証・checkpoint |

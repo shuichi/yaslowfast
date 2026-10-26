@@ -38,6 +38,7 @@ htmlcov/
 # Project datasets, training runs, and generated reports / exports
 # Root-only directories keep fixtures such as tests/data/ trackable.
 /data/
+/datasets/
 /runs/
 /results/
 /exports/

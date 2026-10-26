@@ -12,6 +12,7 @@ import csv
 import hashlib
 import io
 import json
+import logging
 import math
 import random
 import shutil
@@ -19,14 +20,32 @@ import subprocess
 import tarfile
 import tempfile
 from collections import Counter, defaultdict
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any, Iterator, Sequence
 
 from PIL import Image
 
 from .labels import NUM_CLASSES, validate_class_to_idx
 from .normalization import RGBStatistics
+
+LOGGER = logging.getLogger(__name__)
+VIDEO_EXTENSIONS = {
+    ".mp4",
+    ".avi",
+    ".mov",
+    ".mkv",
+    ".webm",
+    ".m4v",
+    ".mpg",
+    ".mpeg",
+    ".mts",
+    ".m2ts",
+    ".ts",
+    ".wmv",
+    ".flv",
+}
 
 
 @dataclass(frozen=True)
@@ -35,6 +54,15 @@ class VideoRecord:
     label: str
     split: str | None = None
     group_id: str | None = None
+    source_archive: Path | None = None
+    source_member: str | None = None
+    sha256: str | None = None
+
+    @property
+    def source(self) -> str:
+        if self.source_archive is not None:
+            return f"{self.source_archive}::{self.source_member}"
+        return str(self.video)
 
 
 def _atomic_json(path: Path, value: Any) -> None:
@@ -49,6 +77,123 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _read_archives(positive: str | Path, negative: str | Path) -> list[VideoRecord]:
+    """Inventory and hash sources without unpacking whole archives to disk.
+
+    Structural errors and duplicate contents are always fatal, including with
+    --skip-errors: silently choosing a label for duplicate sources is ambiguous.
+    """
+    records: list[VideoRecord] = []
+    hashes: dict[str, str] = {}
+    for label, path in (("positive", positive), ("negative", negative)):
+        path = Path(path).resolve()
+        count = 0
+        names: set[str] = set()
+        with tarfile.open(path, "r:*") as archive:
+            for member in archive:
+                name = PurePosixPath(member.name)
+                if (
+                    not member.name
+                    or name.is_absolute()
+                    or ".." in name.parts
+                    or "\\" in member.name
+                    or PureWindowsPath(member.name).drive
+                ):
+                    raise ValueError(f"Unsafe archive path: {path}::{member.name}")
+                if not (member.isdir() or member.isfile()):
+                    raise ValueError(f"Unsupported archive member type: {path}::{member.name}")
+                canonical = name.as_posix()
+                if canonical in names:
+                    raise ValueError(f"Duplicate archive member: {path}::{member.name}")
+                names.add(canonical)
+                if member.isdir():
+                    continue
+                if (
+                    "__MACOSX" in name.parts
+                    or any(part.startswith("._") for part in name.parts)
+                    or name.suffix.lower() not in VIDEO_EXTENSIONS
+                ):
+                    continue
+                stream = archive.extractfile(member)
+                if stream is None:
+                    raise ValueError(f"Cannot read archive member: {path}::{member.name}")
+                digest = hashlib.sha256()
+                with stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                content_hash = digest.hexdigest()
+                source = f"{path}::{member.name}"
+                if content_hash in hashes:
+                    raise ValueError(
+                        f"Duplicate video contents: {source} and {hashes[content_hash]}; "
+                        "refusing duplicate/leaked sources"
+                    )
+                hashes[content_hash] = source
+                records.append(
+                    VideoRecord(
+                        Path(member.name),
+                        label,
+                        source_archive=path,
+                        source_member=member.name,
+                        sha256=content_hash,
+                    )
+                )
+                count += 1
+        if count == 0:
+            raise ValueError(f"Archive contains no supported videos for {label}: {path}")
+    # Both split assignment and the subsequent shuffle must ignore archive order
+    # and location, and the randomly chosen temporary extraction directory.
+    return sorted(records, key=lambda record: (record.label, record.sha256))
+
+
+@contextmanager
+def _source_video(
+    record: VideoRecord, output: Path, archives: dict[Path, tarfile.TarFile]
+) -> Iterator[Path]:
+    if record.source_archive is None:
+        yield record.video
+        return
+    if record.source_archive not in archives:
+        archives[record.source_archive] = tarfile.open(record.source_archive, "r:*")
+    archive = archives[record.source_archive]
+    assert record.source_member is not None
+    try:
+        member = archive.getmember(record.source_member)
+    except KeyError as exception:
+        raise ValueError(f"Source member disappeared: {record.source}") from exception
+    if not member.isfile():
+        raise ValueError(f"Source member is no longer a regular file: {record.source}")
+    with tempfile.TemporaryDirectory(prefix="video-", dir=output) as temporary:
+        # Never extract using the member's own pathname or filesystem metadata.
+        video = Path(temporary) / ("source" + record.video.suffix.lower())
+        stream = archive.extractfile(member)
+        if stream is None:
+            raise ValueError(f"Cannot read archive member: {record.source}")
+        with stream, video.open("wb") as destination:
+            shutil.copyfileobj(stream, destination, length=1024 * 1024)
+        if _sha256(video) != record.sha256:
+            raise ValueError(f"Source video changed after inventory: {record.source}")
+        yield video
+
+
+def _write_manifest(path: Path, records: Sequence[VideoRecord]) -> None:
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("w", encoding="utf-8") as stream:
+        for record in records:
+            assert record.sha256 is not None
+            row = {
+                "source_archive": str(record.source_archive),
+                "source_member": record.source_member,
+                "sha256": record.sha256,
+                "video_id": record.sha256[:24],
+                "label": record.label,
+                "class_id": {"positive": 0, "negative": 1}[record.label],
+                "split": record.split,
+            }
+            stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+    temporary.replace(path)
 
 
 def read_manifest(path: str | Path, video_root: str | Path | None = None) -> list[VideoRecord]:
@@ -145,7 +290,7 @@ def assign_splits(
         groups[
             "group:" + record.group_id
             if record.group_id is not None
-            else "video:" + str(record.video)
+            else "video:" + (record.sha256 or str(record.video))
         ].append(record)
     assigned: dict[str, str] = {}
     strata: dict[tuple[str, ...], list[str]] = defaultdict(list)
@@ -185,9 +330,7 @@ def assign_splits(
                 assigned[key] = split
             offset += count
     return [
-        VideoRecord(record.video, record.label, assigned[key], record.group_id)
-        for key, group in groups.items()
-        for record in group
+        replace(record, split=assigned[key]) for key, group in groups.items() for record in group
     ]
 
 
@@ -340,7 +483,7 @@ class _ShardWriter:
 
 
 def prepare_dataset(
-    manifest: str | Path,
+    manifest: str | Path | None,
     output: str | Path,
     *,
     video_root: str | Path | None = None,
@@ -354,21 +497,37 @@ def prepare_dataset(
     split_ratios: Sequence[float] = (0.8, 0.1, 0.1),
     skip_errors: bool = False,
     class_names: Sequence[str] | None = None,
+    positive: str | Path | None = None,
+    negative: str | Path | None = None,
 ) -> Path:
     """Create a two-class dataset; never overwrite an existing dataset.
 
     ``class_names`` explicitly orders class IDs 0 and 1. Otherwise the two
     manifest labels are sorted. Individual held-out splits may contain one class.
     Unique training JPEG pixels supply the saved RGB normalization statistics.
+    Alternatively, pass manifest=None and both positive/negative archives;
+    those labels have fixed IDs 0/1 and an automatic provenance manifest.
     """
     if not math.isfinite(fps) or fps <= 0 or short_side < 1 or not 1 <= jpeg_quality <= 100:
         raise ValueError("Invalid frame extraction parameters")
     window_frame_indices(1, window_frames, window_stride)
     if not math.isfinite(shard_size_mb) or shard_size_mb <= 0:
         raise ValueError("shard_size_mb must be positive")
-    records = assign_splits(
-        read_manifest(manifest, video_root), seed=seed, split_ratios=split_ratios
-    )
+    archive_input = positive is not None or negative is not None
+    if archive_input:
+        if positive is None or negative is None:
+            raise ValueError("Both positive and negative archives are required")
+        if manifest is not None or video_root is not None or class_names is not None:
+            raise ValueError(
+                "Archive input cannot be combined with manifest/video_root/class_names"
+            )
+        records = _read_archives(positive, negative)
+        class_names = ("positive", "negative")
+    else:
+        if manifest is None:
+            raise ValueError("A manifest or both positive and negative archives are required")
+        records = read_manifest(manifest, video_root)
+    records = assign_splits(records, seed=seed, split_ratios=split_ratios)
     labels = {record.label for record in records}
     if class_names is not None and (
         isinstance(class_names, str)
@@ -398,23 +557,29 @@ def prepare_dataset(
     videos: dict[str, dict[str, Any]] = {}
     errors: list[dict[str, str]] = []
     hashes: dict[str, VideoRecord] = {}
+    archives: dict[Path, tarfile.TarFile] = {}
     statistics = RGBStatistics()
     rng = random.Random(seed)
-    rng.shuffle(records)
     try:
+        if archive_input:
+            _write_manifest(output / "manifest.jsonl", records)
+        rng.shuffle(records)
         for record in records:
             assert record.split is not None
             writing = False
             try:
-                content_hash = _sha256(record.video)
+                content_hash = record.sha256 or _sha256(record.video)
                 if content_hash in hashes:
                     previous = hashes[content_hash]
                     raise ValueError(
-                        f"Duplicate video contents: {record.video} and {previous.video}; refusing duplicate/leaked sources"
+                        f"Duplicate video contents: {record.source} and {previous.source}; refusing duplicate/leaked sources"
                     )
-                with tempfile.TemporaryDirectory(prefix="frames-", dir=output) as temporary:
+                with (
+                    _source_video(record, output, archives) as source_video,
+                    tempfile.TemporaryDirectory(prefix="frames-", dir=output) as temporary,
+                ):
                     frames = extract_frames(
-                        record.video,
+                        source_video,
                         temporary,
                         fps=fps,
                         short_side=short_side,
@@ -430,15 +595,19 @@ def prepare_dataset(
                     video_id = content_hash[:24]
                     # Source hashes and IDs are stable across directory changes.
                     video_info = {
-                        "video": str(record.video),
+                        "video": record.source,
                         "sha256": content_hash,
                         "class_id": class_to_idx[record.label],
                         "label": record.label,
                         "split": record.split,
-                        "group_id": record.group_id,
                         "num_windows": len(windows),
                         "num_frames": len(frames),
                     }
+                    if record.source_archive is not None:
+                        video_info["source_archive"] = str(record.source_archive)
+                        video_info["source_member"] = record.source_member
+                    if record.group_id is not None:
+                        video_info["group_id"] = record.group_id
                     order = list(enumerate(windows))
                     rng.shuffle(order)
                     # Once any member is written, an I/O error must abort the
@@ -450,20 +619,21 @@ def prepare_dataset(
                         metadata = {
                             "video_id": video_id,
                             "class_id": class_to_idx[record.label],
-                            "group_id": record.group_id,
                             "window_index": window_index,
                             "window_start": start / fps,
                             "fps": fps,
                             "valid_frames": valid_frames,
                             "frame_times": [min(index, len(frames) - 1) / fps for index in indices],
                         }
+                        if record.group_id is not None:
+                            metadata["group_id"] = record.group_id
                         images = [frames[index].read_bytes() for index in indices]
                         writers[record.split].write(key, metadata, images)
                     videos[video_id] = video_info
                     hashes[content_hash] = record
                     statistics.merge(video_statistics)
-            except (OSError, ValueError, RuntimeError) as exception:
-                errors.append({"video": str(record.video), "error": str(exception)})
+            except (OSError, ValueError, RuntimeError, tarfile.TarError) as exception:
+                errors.append({"video": record.source, "error": str(exception)})
                 _atomic_json(output / "errors.json", errors)
                 if writing or not skip_errors:
                     raise
@@ -512,10 +682,37 @@ def prepare_dataset(
         _atomic_json(output / "dataset.json", dataset)
         _atomic_json(output / "errors.json", errors)
         incomplete.unlink()
+        if archive_input:
+            if not splits["val"]["num_videos"]:
+                LOGGER.warning(
+                    "No validation (val) videos were produced; preprocessing is complete, "
+                    "but training requires nonempty train and val splits. Add more source videos."
+                )
+            training_classes = {
+                video["class_id"] for video in videos.values() if video["split"] == "train"
+            }
+            if training_classes != set(range(NUM_CLASSES)):
+                LOGGER.warning(
+                    "The train split does not contain both classes; training requires "
+                    "positive and negative training videos."
+                )
         return output / "dataset.json"
     finally:
         for writer in writers.values():
             writer.abort()
+        for archive in archives.values():
+            archive.close()
+
+
+def prepare_archives(
+    positive: str | Path, negative: str | Path, output: str | Path, **kwargs: Any
+) -> Path:
+    """Prepare labelled tar archives, saving their automatically assigned manifest.
+
+    Keyword options match :func:`prepare_dataset`, except manifest, video_root,
+    and class_names. Archive labels always map positive to 0 and negative to 1.
+    """
+    return prepare_dataset(None, output, positive=positive, negative=negative, **kwargs)
 
 
 def verify_dataset(path: str | Path, *, verify_images: bool = True) -> dict[str, int]:
@@ -579,7 +776,9 @@ def verify_dataset(path: str | Path, *, verify_images: bool = True) -> dict[str,
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--manifest", type=Path)
+    parser.add_argument("--positive", type=Path, help="Tar archive of positive videos (class ID 0)")
+    parser.add_argument("--negative", type=Path, help="Tar archive of negative videos (class ID 1)")
+    parser.add_argument("--manifest", type=Path, help="Legacy video manifest; excludes tar input")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--video-root", type=Path)
     parser.add_argument(
@@ -599,7 +798,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--skip-errors",
         action="store_true",
-        help="Explicitly exclude unreadable/duplicate videos and record errors.json",
+        help=(
+            "Exclude unreadable videos and record errors.json; "
+            "archive duplicates/invalid structure remain fatal "
+            "(legacy manifest mode also permits skipping duplicates)"
+        ),
     )
     parser.add_argument(
         "--verify",
@@ -608,11 +811,23 @@ def main(argv: list[str] | None = None) -> None:
         help="Verify an existing dataset, including all JPEGs",
     )
     args = parser.parse_args(argv)
+    archive_input = args.positive is not None or args.negative is not None
     if args.verify is not None:
+        if archive_input or args.manifest is not None:
+            parser.error("--verify cannot be combined with --positive/--negative/--manifest")
         print(json.dumps(verify_dataset(args.verify), indent=2))
         return
-    if args.manifest is None or args.output is None:
-        parser.error("--manifest and --output are required unless --verify is specified")
+    if args.output is None:
+        parser.error("--output is required unless --verify is specified")
+    if archive_input:
+        if args.positive is None or args.negative is None:
+            parser.error("--positive and --negative must be specified together")
+        if args.manifest is not None or args.video_root is not None or args.class_names is not None:
+            parser.error(
+                "--positive/--negative cannot be combined with --manifest/--video-root/--class-names"
+            )
+    elif args.manifest is None:
+        parser.error("Specify both --positive and --negative, or --manifest")
     values = vars(args)
     values.pop("verify")
     print(prepare_dataset(**values))
