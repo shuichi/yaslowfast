@@ -308,7 +308,7 @@ def main() -> None:
         type=int,
         choices=range(DEFAULT_OPSET, MAX_OPSET + 1),
         default=DEFAULT_OPSET,
-        help="ONNX operator set (default: 18, maximum: 22)",
+        help=f"ONNX operator set (default: {DEFAULT_OPSET}, maximum: {MAX_OPSET})",
     )
     parser.add_argument(
         "--threads", type=int, default=1, help="CPU export and verification threads"

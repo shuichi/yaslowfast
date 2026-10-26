@@ -20,7 +20,6 @@ def distribution_project(tmp_path):
         "uv.lock": "version = 1\n",
         ".python-version": "3.12\n",
         ".gitignore": ".venv/\ndist/\n",
-        "licenses/PYTORCHVIDEO-LICENSE": "Third-party license\n",
         "src/yaslowfast/__init__.py": "__version__ = '0.1.0'\n",
         "src/yaslowfast/nested/module.py": "VALUE = 1\n",
         "src/yaslowfast/module.pyi": "VALUE: int\n",
@@ -109,7 +108,7 @@ def test_distribution_includes_source_and_excludes_local_artifacts(distribution_
     assert set(contents) == {f"yaslowfast-0.1.0/{name}" for name in expected}
     assert contents["yaslowfast-0.1.0/uv.lock"] == b"version = 1\n"
     assert contents["yaslowfast-0.1.0/LICENSE"] == b"Project license\n"
-    assert contents["yaslowfast-0.1.0/licenses/PYTORCHVIDEO-LICENSE"] == b"Third-party license\n"
+    assert contents["yaslowfast-0.1.0/THIRD_PARTY_NOTICES.md"] == b"Third-party notices\n"
 
 
 @pytest.mark.parametrize("custom_output", [False, True])
@@ -165,7 +164,7 @@ def test_extracted_distribution_can_repackage_without_git(distribution_project, 
     assert archive_contents(extracted_root / "dist/yaslowfast-0.1.0-source.zip") == original
 
 
-@pytest.mark.parametrize("license_file", ["LICENSE", "licenses/PYTORCHVIDEO-LICENSE"])
+@pytest.mark.parametrize("license_file", ["LICENSE", "THIRD_PARTY_NOTICES.md"])
 def test_distribution_refuses_missing_required_license(distribution_project, license_file):
     root, _ = distribution_project
     (root / license_file).unlink()

@@ -1,6 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 # Ported and restructured for yaslowfast: binary classification, pure PyTorch,
-# two tensor inputs, optional adaptive pooling. See THIRD_PARTY_NOTICES.md and licenses/.
+# two tensor inputs, optional adaptive pooling. See THIRD_PARTY_NOTICES.md and LICENSE.
 """Binary SlowFast-R50 with a model definition ported and restructured in PyTorch.
 
 The PyTorchVideo ``slowfast_r50`` model definition was ported into this local

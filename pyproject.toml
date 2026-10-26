@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Binary video classification with SlowFast-R50, WebDataset and PyTorch DDP"
 readme = "README.md"
 license = "Apache-2.0"
-license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "licenses/PYTORCHVIDEO-LICENSE"]
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 requires-python = ">=3.11,<3.15"
 dependencies = [
   "torch==2.14.1",
@@ -22,7 +22,7 @@ dependencies = [
 dev = ["pytest>=8.3,<10", "ruff>=0.11"]
 export = [
   "onnx==1.17.0",
-  "onnxruntime==1.22.0",
+  "onnxruntime==1.20.1",
   "onnxscript==0.7.2",
   "onnx-ir==1.1.0",
 ]
@@ -40,7 +40,6 @@ yaslowfast-stats = "yaslowfast.stats:main"
 packages = ["src/yaslowfast"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"licenses/PYTORCHVIDEO-LICENSE" = "yaslowfast/licenses/PYTORCHVIDEO-LICENSE"
 "THIRD_PARTY_NOTICES.md" = "yaslowfast/THIRD_PARTY_NOTICES.md"
 
 [tool.pytest.ini_options]

@@ -157,8 +157,8 @@ def test_compat_rejects_incompatible_temporal_configuration(num_frames, alpha):
         CompatSlowFast(InspectPathways(), config.model, config.data)
 
 
-@pytest.fixture(scope="module")
-def exported_compat_model(tmp_path_factory):
+@pytest.fixture(scope="module", params=[18, 21])
+def exported_compat_model(tmp_path_factory, request):
     onnx = pytest.importorskip("onnx")
     ort = pytest.importorskip("onnxruntime")
     pytest.importorskip("onnxscript")
@@ -184,7 +184,9 @@ def exported_compat_model(tmp_path_factory):
     previous = torch.get_num_threads()
     torch.set_num_threads(1)
     try:
-        result = export_checkpoint(checkpoint, output, format="onnx", compat_mode="slowfast")
+        result = export_checkpoint(
+            checkpoint, output, format="onnx", compat_mode="slowfast", opset_version=request.param
+        )
     finally:
         torch.set_num_threads(previous)
     graph = onnx.load(output)
@@ -199,11 +201,15 @@ def test_compat_single_file_signature_and_versions(exported_compat_model):
 
     graph, session, _, result, _ = exported_compat_model
     assert onnx.__version__ == "1.17.0"
-    assert ort.__version__ == "1.22.0"
+    assert ort.__version__ == "1.20.1"
     onnx.checker.check_model(graph)
     validate_compat_graph(graph)
     assert graph.ir_version <= 10
-    assert {entry.domain: entry.version for entry in graph.opset_import}[""] == 18
+    assert {entry.domain: entry.version for entry in graph.opset_import}[""] == result[
+        "verification"
+    ]["opset_version"]
+    assert result["verification"]["opset_version"] in {18, 21}
+    assert result["verification"]["onnxruntime_version"] == "1.20.1"
     assert all(not tensor.external_data for tensor in graph.graph.initializer)
     assert [(value.name, value.shape, value.type) for value in session.get_inputs()] == [
         ("input_slow", ["batch_size", 3, 8, 430, 295], "tensor(float)"),
@@ -301,7 +307,7 @@ def test_compat_checkpoint_labels_do_not_change_onnx_output_columns(
     assert saved["class_to_idx"] == class_to_idx
 
 
-@pytest.mark.parametrize("opset", [0, 23])
+@pytest.mark.parametrize("opset", [0, 22, 23])
 def test_export_rejects_opsets_outside_supported_range(exported_compat_model, tmp_path, opset):
     checkpoint = exported_compat_model[-1]
     output = tmp_path / "invalid.onnx"

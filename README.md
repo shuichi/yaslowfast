@@ -10,7 +10,7 @@ PyTorch 2.14.1で、SlowFast-R50をスクラッチ学習する動画の二値分
 
 このプロジェクトは **Apache License 2.0** の下で公開しています。全文は[LICENSE](LICENSE)を参照してください。
 
-PyTorchVideo由来部分の著作権表示と変更内容は[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)、元のライセンス本文は[licenses/PYTORCHVIDEO-LICENSE](licenses/PYTORCHVIDEO-LICENSE)に保持しています。これらはプロジェクトの`LICENSE`とともに、wheel・sdist・配布用ソースZIPに同梱します。
+PyTorchVideo由来部分の著作権表示と変更内容は[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)、Apache License 2.0本文は[LICENSE](LICENSE)に保持しています。これらはwheel・sdist・配布用ソースZIPに同梱します。
 
 ## 最短手順（H100 × 8、1ノード）
 
@@ -44,7 +44,7 @@ python -c 'import torch; print(torch.__version__, torch.version.cuda, torch.cuda
 
 CUDA環境では、GPU・ドライバーに合うPyTorch 2.14.1のwheelを[公式インストール案内](https://pytorch.org/get-started/locally/)に従って選んでください。専用indexを使う場合はuvのindex設定も管理し、再度`uv sync`したときに意図しないwheelへ戻らないようにします。GPU学習前には上記コマンドでCUDAが利用可能なことを確認してください。
 
-ONNX書き出しとONNX Runtimeによる一致検証も使う場合は、Python 3.12の環境にexport extraを追加します。ONNXは1.17.0、ONNX Runtimeは1.22.0に固定しています。ONNX 1.17.0の公式wheelはPython 3.12までなので、学習側のPython対応範囲とは別に、ONNX書き出しにはPython 3.12を使用してください。`torch.export`形式だけなら追加依存は不要です。
+ONNX書き出しとONNX Runtimeによる一致検証も使う場合は、Python 3.12の環境にexport extraを追加します。ONNXは1.17.0、対象アプリに合わせてONNX Runtimeは1.20.1に固定しています。ONNX 1.17.0の公式wheelはPython 3.12までなので、学習側のPython対応範囲とは別に、ONNX書き出しにはPython 3.12を使用してください。`torch.export`形式だけなら追加依存は不要です。
 
 ```sh
 uv sync --locked --python 3.12 --extra dev --extra export
@@ -74,7 +74,7 @@ ZIPには`yaslowfast-<バージョン>/`フォルダを作り、以下を同梱�
 
 - `src/yaslowfast/`内のPythonソース・型定義、`configs/`内のYAML、`tests/`内のPythonテスト
 - `README.md`、`pyproject.toml`、`uv.lock`、`.python-version`、`.gitignore`
-- `LICENSE`、`THIRD_PARTY_NOTICES.md`、`licenses/PYTORCHVIDEO-LICENSE`、`tools/make_dist.py`
+- `LICENSE`、`THIRD_PARTY_NOTICES.md`、`tools/make_dist.py`
 
 同梱対象を明示する許可リスト方式です。`.venv/`やuvのキャッシュ、データセット、動画、学習結果、モデルの重み、既存ZIP、`.env`、Gitの履歴などは含めません。対象フォルダ内でもデータ・実行結果・仮想環境のディレクトリ、隠しファイル、キャッシュ、シンボリックリンクを除外します。`.gitignore`を変更してもZIPの対象は変わりません。新しい配布ファイルが必要になったら、[tools/make_dist.py](tools/make_dist.py)の`REQUIRED_FILES`／`SOURCE_TREES`を更新し、`--dry-run`で確認してください。
 
@@ -396,7 +396,11 @@ yaslowfast-export --checkpoint runs/experiment01/best.pt \
 
 通常モードは固定shapeの`slow`と`fast`の2入力、float32・NCTHW形式で書き出します。入力はRGB正規化と時間／空間サンプリング済みのテンソル、出力`logits`は2クラスのlogitsです。動画デコードや前処理そのものはグラフに含めません。クラス対応と正確な前処理仕様を隣接する`.pt2.json`／`.onnx.json`に保存します。書き出したartifactを再読み込みし、PyTorch eager出力との数値一致を確認してから公開します。
 
-ONNXの既定opsetは18です。`--opset-version`の対応範囲は18〜22とし、生成したファイルの実際のopsetとIRバージョン（上限10）を検査します。ONNX 1.17.0のcheckerとONNX Runtime 1.22.0でのロード・実推論・PyTorch出力との比較に成功したファイルだけを公開します。重みをONNX本体に埋め込み、外部の重みファイルを必要としません。
+ONNXの既定opsetは18です。`--opset-version`の対応範囲は18〜21とし、生成したファイルの実際のopsetとIRバージョン（上限10）を検査します。これは[ONNX Runtime 1.20の対応範囲](https://onnxruntime.ai/docs/reference/compatibility.html)に合わせた制限です。ONNX 1.17.0のcheckerとONNX Runtime 1.20.1でのロード・実推論・PyTorch出力との比較に成功したファイルだけを公開します。重みをONNX本体に埋め込み、外部の重みファイルを必要としません。
+
+通常・互換モードともに、保存前にサブグラフとローカル関数を含む全ノードの名前を検査し、無名・重複名を一意の名前に補正します。これにより、ORT 1.20.1の`GatherSliceToSplitFusion`が無名ノードから同名のノードを作り、モデルの読み込みに失敗する問題を防ぎます。補正はノード名のみを変更し、演算・重み・入出力名は維持します。Runtimeの最適化は有効のまま検証します。
+
+以前に書き出したONNXは自動更新されません。`uv sync --locked --python 3.12 --extra dev --extra export`で依存環境を更新し、同じcheckpointから再エクスポートしてください。再学習は不要です。旧設定のopset 22は受け付けないため、既定の18または対応範囲内を指定してください。
 
 ### 既存SlowFast入出力との互換モード
 
@@ -429,7 +433,7 @@ Slowのフレーム選択は、学習時に合わせてFastの`[0,4,8,13,17,22,2
 
 互換モードでは動的バッチを検証します。Softmaxは含まず、出力0と出力1の大小をそのまま比較できます。隣接JSONの`class_to_idx`は、checkpointに保存された対応をそのまま記録します。これは学習元の情報であり、互換モードの処理分岐には使用しません。固定の出力列対応は`output_class_indices: [0, 1]`として記録します。通常の学習、WebDatasetの形式、通常モードの前処理済み入力の仕様は変わりません。
 
-この互換性は、既存の呼び出しが同じ入出力で新モデルを実行できることを対象とします。入力画像を作る前のROI切り抜きや変形、フレーム抽出で失われた情報は復元できません。撮影・切り抜き・時間間隔をそろえた代表データで分類精度を確認してください。実際のAndroid／iOSアプリのRuntimeやExecutionProviderでの動作と速度は、Python版Runtime 1.22.0のCPU検証とは別に確認する必要があります。
+この互換性は、既存の呼び出しが同じ入出力で新モデルを実行できることを対象とします。入力画像を作る前のROI切り抜きや変形、フレーム抽出で失われた情報は復元できません。撮影・切り抜き・時間間隔をそろえた代表データで分類精度を確認してください。実際のAndroid／iOSアプリのRuntimeやExecutionProviderでの動作と速度は、Python版Runtime 1.20.1のCPU検証とは別に確認する必要があります。
 
 ### 速度測定
 
@@ -485,8 +489,9 @@ macOSでは`torchrun --standalone`がホスト名の解決によって起動待�
 | R50 backward | 小さい時空間入力（8/2フレーム・32px）で全パラメータの勾配が有限 |
 | 通常モードの二値R50 ONNX（依存固定前の記録） | 未学習2クラス・32/8フレーム・224pxで書き出し成功、出力は`[1, 2]`、ONNX Runtimeとeagerの最大絶対誤差9.31e-8 |
 | 互換モードの二値R50 ONNX | ランダム初期化の33,649,098パラメータ、入力430×295・内部crop224。任意ラベル`positive=0, negative=1`で出力列`[0, 1]`を維持。単一ファイル135,143,551 bytes、バッチ1・2・4をバイト列からロードして推論成功。PyTorchとの最大絶対誤差1.0804e-7 |
-| 互換モードの検証環境 | ONNX 1.17.0、ONNX Runtime 1.22.0、ONNX Script 0.7.2、onnx-ir 1.1.0、opset 18、IR 10 |
-| 上限opsetとCLI | 任意ラベル`class_zero`／`class_one`の小型モデルを、ラベル指定なしのCLIでopset 22に書き出し。出力列`[0, 1]`を維持し、バッチ1・2・4で推論成功。最大絶対誤差7.4506e-9 |
+| 上記R50互換モードの検証環境（ORT 1.20.1対応前の記録） | ONNX 1.17.0、ONNX Runtime 1.22.0、ONNX Script 0.7.2、onnx-ir 1.1.0、opset 18、IR 10 |
+| 上限opsetとCLI（ORT 1.20.1対応前の記録） | 任意ラベル`class_zero`／`class_one`の小型モデルを、ラベル指定なしのCLIでopset 22に書き出し。出力列`[0, 1]`を維持し、バッチ1・2・4で推論成功。最大絶対誤差7.4506e-9。現在の上限は21 |
+| ORT 1.20.1対応 | export関連74テスト成功。小型SlowFastの通常・互換モードをopset 18／21で書き出し、互換モードはバッチ1・2・4でPyTorchとの数値一致を確認。無名Gather群の最適化時の名前衝突を再現し、命名補正後のロード・推論成功、名前以外のprotobuf不変、サブグラフ・ローカル関数内の命名を確認 |
 | wheel / sdist | ビルド成功、wheel内の第三者ライセンス同梱を確認 |
 
 CPUテスト中に、利用可能なアクセラレーターによって`pin_memory`が無効になる旨のPyTorch警告が出る場合があります。CUDA／NCCL、CUDA AMP、複数GPU・複数ノード、MPS、およびモバイル端末での実機検証は別途必要です。CPUでのテスト成功を、それらの性能や動作の検証済みという意味では扱いません。
@@ -518,4 +523,4 @@ CPUテスト中に、利用可能なアクセラレーターによって`pin_mem
 - [WebDatasetの形式と実装](https://github.com/webdataset/webdataset)
 - [FFmpeg fps filter](https://ffmpeg.org/ffmpeg-filters.html#fps)
 
-PyTorchVideo由来部分の著作権表示と変更内容は[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)、Apache License 2.0本文は[licenses/PYTORCHVIDEO-LICENSE](licenses/PYTORCHVIDEO-LICENSE)に保存し、wheelにも同梱しています。
+PyTorchVideo由来部分の著作権表示と変更内容は[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)、Apache License 2.0本文は[LICENSE](LICENSE)に保存し、wheelにも同梱しています。

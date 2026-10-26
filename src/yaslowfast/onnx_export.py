@@ -11,9 +11,9 @@ import torch
 from torch import Tensor, nn
 
 ONNX_VERSION = "1.17.0"
-RUNTIME_VERSION = "1.22.0"
+RUNTIME_VERSION = "1.20.1"
 DEFAULT_OPSET = 18
-MAX_OPSET = 22
+MAX_OPSET = 21
 MAX_IR_VERSION = 10
 
 
@@ -34,6 +34,31 @@ def _messages(message: Any) -> Iterator[Any]:
                 yield from _messages(value)
 
 
+def normalize_node_names(model: Any) -> None:
+    """Name nodes in place without changing tensors, operators or graph interfaces.
+
+    ONNX Runtime 1.20.1 derives some optimizer-created names from source node
+    names. Anonymous or repeated names can therefore collide during loading.
+    Include subgraphs and local functions, which the runtime may inline.
+    """
+    import onnx
+
+    nodes = [message for message in _messages(model) if isinstance(message, onnx.NodeProto)]
+    reserved = {node.name for node in nodes if node.name}
+    seen: set[str] = set()
+    for index, node in enumerate(nodes):
+        if not node.name or node.name in seen:
+            base = f"yaslowfast_{node.op_type}_{index}"
+            name = base
+            suffix = 1
+            while name in reserved:
+                name = f"{base}_{suffix}"
+                suffix += 1
+            node.name = name
+            reserved.add(name)
+        seen.add(node.name)
+
+
 def validate_onnx_model(model: Any, *, opset_version: int) -> None:
     """Inspect the actual graph; never disguise an unsupported IR or operator set."""
     import onnx
@@ -45,6 +70,7 @@ def validate_onnx_model(model: Any, *, opset_version: int) -> None:
     if imports != [opset_version]:
         raise ValueError(f"Exported ONNX opset {imports} does not match requested {opset_version}")
     local_functions = {(f.domain, f.name) for f in model.functions}
+    node_names: set[str] = set()
     for message in _messages(model):
         if isinstance(message, onnx.TensorProto):
             if message.data_location == onnx.TensorProto.EXTERNAL or message.external_data:
@@ -53,6 +79,9 @@ def validate_onnx_model(model: Any, *, opset_version: int) -> None:
             if message.domain in {"", "ai.onnx"} and not 1 <= message.version <= MAX_OPSET:
                 raise ValueError(f"ONNX operator set exceeds {MAX_OPSET}: {message.version}")
         elif isinstance(message, onnx.NodeProto):
+            if not message.name or message.name in node_names:
+                raise ValueError("ONNX node names must be non-empty and globally unique")
+            node_names.add(message.name)
             if (
                 message.domain not in {"", "ai.onnx"}
                 and (message.domain, message.op_type) not in local_functions
@@ -105,6 +134,7 @@ def export_onnx(
     graph = onnx.load_model(destination, load_external_data=False)
     if finalize is not None:
         graph = finalize(graph)
+    normalize_node_names(graph)
     validate_onnx_model(graph, opset_version=opset_version)
     onnx.save_model(graph, destination, save_as_external_data=False)
     # A mobile caller may only supply bytes, so do not rely on adjacent files.

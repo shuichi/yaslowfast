@@ -24,7 +24,6 @@ REQUIRED_FILES = (
     "uv.lock",
     ".python-version",
     ".gitignore",
-    "licenses/PYTORCHVIDEO-LICENSE",
     "tools/make_dist.py",
 )
 SOURCE_TREES = {

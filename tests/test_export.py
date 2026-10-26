@@ -7,8 +7,10 @@ from yaslowfast.export import export_model
 from yaslowfast.models import SlowFast, pack_pathways
 
 
-@pytest.mark.parametrize("format,suffix", [("torch", ".pt2"), ("onnx", ".onnx")])
-def test_fixed_shape_export_roundtrip(tmp_path, format, suffix):
+@pytest.mark.parametrize(
+    "format,suffix,opset", [("torch", ".pt2", 18), ("onnx", ".onnx", 18), ("onnx", ".onnx", 21)]
+)
+def test_fixed_shape_export_roundtrip(tmp_path, format, suffix, opset):
     if format == "onnx":
         pytest.importorskip("onnxruntime")
         pytest.importorskip("onnxscript")
@@ -22,6 +24,7 @@ def test_fixed_shape_export_roundtrip(tmp_path, format, suffix):
             inputs,
             tmp_path / ("model" + suffix),
             format=format,
+            opset_version=opset,
             metadata={"class_to_idx": {"a": 0, "b": 1}},
         )
         with open(result["metadata"]) as stream:
@@ -36,6 +39,9 @@ def test_fixed_shape_export_roundtrip(tmp_path, format, suffix):
         assert metadata["output"]["class_ids"] == [0, 1]
         assert metadata["output"]["probability_activation"] == "softmax(dim=1)"
         assert metadata["verification"]["max_absolute_error"] < 1e-5
+        if format == "onnx":
+            assert metadata["verification"]["onnxruntime_version"] == "1.20.1"
+            assert metadata["verification"]["opset_version"] == opset
     finally:
         torch.set_num_threads(previous)
 

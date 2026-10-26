@@ -13,7 +13,7 @@ tests, or export.
 - Reference commit: `2ac6ed361309cb25144636ad82dd8bd6a4970e0c`
 - Referenced files: `pytorchvideo/models/{slowfast,resnet,stem,head,net,weight_init}.py`
 - Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
-- License: Apache License 2.0, reproduced in `licenses/PYTORCHVIDEO-LICENSE`.
+- License: Apache License 2.0, reproduced in `LICENSE`.
 
 Changes: ported and restructured the SlowFast-R50 model definition into a single
 pure-PyTorch module; fixed the classification head to two outputs for binary
