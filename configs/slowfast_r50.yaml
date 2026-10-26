@@ -1,0 +1,49 @@
+# Binary classification: exactly two labels (IDs 0 and 1), two output logits.
+# Paths are relative to the working directory. 1 epoch is a fixed update budget.
+model:
+  num_frames: 32
+  alpha: 4
+  crop_size: 224
+  dropout: 0.5
+  pooling: adaptive
+data:
+  dataset: data/dataset.json
+  train_split: train
+  val_split: val
+  batch_size: 8  # per rank, before gradient accumulation
+  num_workers: 8  # per rank; 64 workers with 8 GPUs
+  shuffle_buffer: 256
+  normalization: auto  # use training RGB mean/std saved by yaslowfast-prepare
+  train_min_scale: 256
+  train_max_scale: 320
+  horizontal_flip: 0.0  # enable only if it preserves class semantics
+  color_jitter: 0.0
+  video_balanced: true
+train:
+  output_dir: runs/slowfast_r50
+  device: auto
+  seed: 42
+  epochs: 196
+  steps_per_epoch: null  # ceil(train windows / effective global batch)
+  accumulation_steps: 1
+  learning_rate: 0.1
+  reference_batch_size: 64
+  scale_learning_rate: true
+  momentum: 0.9
+  weight_decay: 0.0001
+  norm_weight_decay: 0.0
+  warmup_epochs: 34
+  warmup_start_factor: 0.1
+  min_lr_ratio: 0.0
+  precision: auto
+  sync_batchnorm: false
+  grad_clip_norm: null
+  label_smoothing: 0.0
+  mixup_alpha: 0.0
+  compile: false
+  channels_last_3d: false
+  deterministic: false
+  allow_tf32: true
+  eval_every: 1
+  best_metric: accuracy
+  log_every: 10

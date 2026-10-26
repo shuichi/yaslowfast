@@ -1,0 +1,82 @@
+# uv / virtual environments
+# Keep pyproject.toml, uv.lock, and .python-version under version control.
+.venv/
+venv/
+.uv-cache/
+.cache/uv/
+
+# Python bytecode and packaging artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+*.egg
+build/
+dist/
+
+# Test, lint, type-check, and coverage caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pytype/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.ipynb_checkpoints/
+
+# Local environment variables; keep shareable templates
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+
+# Project datasets, training runs, and generated reports / exports
+# Root-only directories keep fixtures such as tests/data/ trackable.
+/data/
+/runs/
+/results/
+/exports/
+*.pt
+*.pth
+*.pt2
+*.pt2.json
+*.onnx
+*.onnx.data
+*.onnx.json
+
+# Editor-local state and backup files (keep shared editor settings)
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/shelf/
+.vs/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble/
+.LSOverride
+._*
+.Spotlight-V100/
+.Trashes/
+.fseventsd/
+.TemporaryItems/
+
+# Linux
+.directory
+.Trash-*/
+.nfs*
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+[Dd]esktop.ini
+$RECYCLE.BIN/

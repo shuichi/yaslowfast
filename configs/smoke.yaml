@@ -1,0 +1,26 @@
+# Binary classification with two logits, matching the R50 label/output contract.
+# Small architecture for CPU integration tests; NOT the R50 recipe.
+model:
+  num_frames: 8
+  crop_size: 32
+  width_per_group: 8
+  stage_depths: [1, 1, 1, 1]
+  dropout: 0.0
+data:
+  dataset: data/dataset.json
+  batch_size: 2
+  num_workers: 0
+  shuffle_buffer: 4
+  train_min_scale: 32
+  train_max_scale: 40
+train:
+  output_dir: runs/smoke
+  device: cpu
+  epochs: 2
+  steps_per_epoch: 2
+  warmup_epochs: 0
+  learning_rate: 0.01
+  scale_learning_rate: false
+  precision: fp32
+  deterministic: true
+  log_every: 1
