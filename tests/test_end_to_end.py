@@ -105,6 +105,14 @@ def tiny_config(dataset, output, *, epochs=2, steps=2, dropout=0.2):
     )
 
 
+def _assert_clean_worker_shutdown(result):
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    # Exceptions in the iterator's __del__ do not change the parent's exit code.
+    assert "_MultiProcessingDataLoaderIter.__del__" not in output, output
+    assert "terminate called without an active exception" not in output, output
+
+
 @pytest.mark.integration
 def test_real_video_training_resume_matches_uninterrupted(video_dataset, tmp_path):
     torch.set_num_threads(2)
@@ -144,6 +152,60 @@ def test_real_video_training_resume_matches_uninterrupted(video_dataset, tmp_pat
             )
     report = json.loads((tmp_path / "resumed" / "validation.json").read_text())
     assert report["num_videos"] == 2 and report["num_windows"] == 4
+
+
+@pytest.mark.integration
+def test_worker_shutdown_preserves_legacy_checkpoint_resume(video_dataset, tmp_path, monkeypatch):
+    torch.set_num_threads(2)
+
+    def config(output):
+        value = tiny_config(video_dataset, output)
+        value.data.num_workers = 2
+        value.data.horizontal_flip = 0.5
+        value.data.color_jitter = 0.2
+        value.train.mixup_alpha = 0.3
+        return value
+
+    # Reproduce the old epoch boundary: the same infinite stream is abandoned
+    # without signalling/draining it, and iterator destruction stops the workers.
+    # No checkpoint fields or resume-contract values are rewritten for the test.
+    with monkeypatch.context() as legacy:
+        legacy.setattr("yaslowfast.train.finish_training_epoch", lambda loader, iterator: None)
+        run_training(config(tmp_path / "legacy-full"))
+        run_training(config(tmp_path / "resumed"), stop_after_epoch=1)
+
+    checkpoint_path = tmp_path / "resumed" / "latest.pt"
+    boundary = load_checkpoint(checkpoint_path)
+    assert boundary["epoch"] == 1 and boundary["global_step"] == 2
+    run_training(config(tmp_path / "resumed"), resume=str(checkpoint_path))
+    run_training(config(tmp_path / "new-full"))
+
+    expected = load_checkpoint(tmp_path / "legacy-full" / "latest.pt")
+    for path in (checkpoint_path, tmp_path / "new-full" / "latest.pt"):
+        actual = load_checkpoint(path)
+        for key in ("model", "optimizer", "scheduler", "scaler"):
+            torch.testing.assert_close(actual[key], expected[key], rtol=0, atol=0, msg=key)
+        for key in (
+            "format_version",
+            "epoch",
+            "global_step",
+            "best_metric",
+            "resume_contract",
+            "world_size",
+            "precision",
+            "torch_version",
+        ):
+            assert actual[key] == expected[key], key
+        assert len(actual["rng_states"]) == len(expected["rng_states"])
+        for actual_rng, expected_rng in zip(
+            actual["rng_states"], expected["rng_states"], strict=True
+        ):
+            for key in ("python", "numpy"):
+                assert actual_rng[key] == expected_rng[key], key
+            for key in ("torch", "cuda", "mps"):
+                torch.testing.assert_close(
+                    actual_rng[key], expected_rng[key], rtol=0, atol=0, msg=key
+                )
 
 
 @pytest.mark.integration
@@ -285,7 +347,7 @@ def test_two_rank_training_checkpoint_and_resume(video_dataset, tmp_path):
         env=environment,
         timeout=120,
     )
-    assert result.returncode == 0, result.stdout + result.stderr
+    _assert_clean_worker_shutdown(result)
     checkpoint_path = tmp_path / "ddp" / "latest.pt"
     checkpoint = load_checkpoint(checkpoint_path)
     assert checkpoint["world_size"] == 2 and len(checkpoint["rng_states"]) == 2
@@ -300,7 +362,7 @@ def test_two_rank_training_checkpoint_and_resume(video_dataset, tmp_path):
         env=environment,
         timeout=120,
     )
-    assert result.returncode == 0, result.stdout + result.stderr
+    _assert_clean_worker_shutdown(result)
     checkpoint = load_checkpoint(checkpoint_path)
     assert checkpoint["epoch"] == 2 and checkpoint["global_step"] == 4
     report = json.loads((tmp_path / "ddp" / "validation.json").read_text())
@@ -313,7 +375,7 @@ def test_two_rank_training_checkpoint_and_resume(video_dataset, tmp_path):
         env=environment,
         timeout=120,
     )
-    assert result.returncode == 0, result.stdout + result.stderr
+    _assert_clean_worker_shutdown(result)
     uninterrupted = load_checkpoint(tmp_path / "ddp-full" / "latest.pt")
     for name, value in uninterrupted["model"].items():
         torch.testing.assert_close(checkpoint["model"][name], value, rtol=0, atol=0, msg=name)

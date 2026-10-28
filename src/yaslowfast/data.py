@@ -13,6 +13,7 @@ import json
 import random
 from collections.abc import Iterator, Sequence
 from pathlib import Path
+from threading import Event
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -25,6 +26,8 @@ from webdataset.tariterators import tarfile_samples
 from .labels import NUM_CLASSES, validate_class_to_idx
 
 if TYPE_CHECKING:
+    from multiprocessing.synchronize import Event as ProcessEvent
+
     from .config import DataConfig, ModelConfig
 
 
@@ -216,6 +219,7 @@ class VideoWebDataset(IterableDataset):
         rank: int = 0,
         world_size: int = 1,
         training: bool = False,
+        stop_event: Event | ProcessEvent | None = None,
     ):
         super().__init__()
         if not 0 <= rank < world_size:
@@ -225,6 +229,7 @@ class VideoWebDataset(IterableDataset):
         if split not in self.metadata["splits"]:
             raise ValueError(f"Unknown split: {split}")
         self.split, self.config, self.model_config = split, config, model_config
+        self._stop_event = stop_event
         self.seed, self.epoch, self.rank, self.world_size, self.training = (
             seed,
             epoch,
@@ -242,6 +247,8 @@ class VideoWebDataset(IterableDataset):
             )
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
+        if self._stop_event is not None and self._stop_event.is_set():
+            return
         info = get_worker_info()
         worker, workers = (info.id, info.num_workers) if info is not None else (0, 1)
         shard_rng = random.Random(_seed(self.seed, self.epoch, self.rank, worker, "shards"))
@@ -260,7 +267,14 @@ class VideoWebDataset(IterableDataset):
         samples = tarfile_samples(sources)
         if self.training:
             samples = _shuffle_encoded(samples, self.config.shuffle_buffer, shuffle_rng)
-        for sample in samples:
+        # Until the parent finishes its optimizer updates, this is exactly the
+        # same infinite stream, including overflow retries. Check before reading
+        # so stopping an idle worker does not fill a new shuffle buffer.
+        while self._stop_event is None or not self._stop_event.is_set():
+            try:
+                sample = next(samples)
+            except StopIteration:
+                return
             try:
                 metadata = json.loads(sample["json"])
                 video = self.metadata["videos"][metadata["video_id"]]
@@ -317,6 +331,9 @@ def build_loader(
 ) -> DataLoader:
     if batch_size < 1 or num_workers < 0:
         raise ValueError("batch_size must be positive and num_workers must be non-negative")
+    stop_event = None
+    if training:
+        stop_event = torch.multiprocessing.get_context("spawn").Event() if num_workers else Event()
     dataset = VideoWebDataset(
         dataset_path,
         split,
@@ -327,6 +344,7 @@ def build_loader(
         rank=rank,
         world_size=world_size,
         training=training,
+        stop_event=stop_event,
     )
     generator = torch.Generator().manual_seed(_seed(seed, epoch, rank, 0, "loader"))
     kwargs: dict[str, Any] = {}
@@ -347,3 +365,22 @@ def build_loader(
         generator=generator,
         **kwargs,
     )
+
+
+def finish_training_epoch(loader: DataLoader, iterator: Iterator[dict[str, Any]]) -> None:
+    """Stop producing samples and consume queued batches before workers exit.
+
+    Only call after the final optimizer update. The discarded prefetch does not
+    affect training or the next epoch's independently seeded stream. Exhausting
+    this *same* iterator lets DataLoader receive every worker's end-of-stream
+    marker before shutting down queues and the pin-memory thread. In contrast,
+    deleting a live infinite iterator can interrupt Tensor transfers at exit.
+    """
+    dataset = loader.dataset
+    if not isinstance(dataset, VideoWebDataset) or dataset._stop_event is None:
+        raise ValueError("Expected a training loader with an epoch stop event")
+    dataset._stop_event.set()
+    # Keep errors visible: an unread corrupt sample or a failed worker must not
+    # silently turn into a successful epoch/checkpoint.
+    for _ in iterator:
+        pass

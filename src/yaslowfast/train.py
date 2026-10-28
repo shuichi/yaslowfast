@@ -21,7 +21,7 @@ from torch.nn.parallel import DistributedDataParallel
 
 from .checkpoint import atomic_save, capture_rng_state, load_checkpoint, restore_rng_state
 from .config import Config, apply_dataset_normalization, load_config, validate_config
-from .data import build_loader, dataset_fingerprint, read_dataset
+from .data import build_loader, dataset_fingerprint, finish_training_epoch, read_dataset
 from .distributed import DistributedContext, all_ranks_finite
 from .evaluate import evaluate_model
 from .labels import NUM_CLASSES, validate_class_to_idx
@@ -219,6 +219,7 @@ def train_epoch(
     if context.distributed:
         dist.all_reduce(totals)
     duration = time.perf_counter() - start
+    finish_training_epoch(loader, iterator)
     return {
         "loss": (totals[0] / totals[2]).item(),
         "accuracy": (totals[1] / totals[2]).item() if config.train.mixup_alpha == 0 else None,

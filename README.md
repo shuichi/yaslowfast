@@ -303,6 +303,8 @@ torchrun --nnodes=2 --nproc-per-node=4 \
 
 学習はrank・worker・epochごとのseedで、shardを復元抽出する無限ストリームです。各shardを選んだら中の全サンプルを読み、圧縮状態のbufferでshuffleしてから必要なフレームだけをdecodeします。サンプルの再訪問は仕様です。
 
+epochの規定update数に達するとworkerへ停止を通知し、先読み済みのbatchを学習に使わず読み切ってからworkerを終了します。学習中のサンプル順・epochごとのseed・FP16 overflow時の追加読み取りは変わりません。この終了処理の変更は設定やcheckpoint形式を変更しないため、従来のcheckpointから同じ設定で再開できます。
+
 **1 epochは全データの重複なし一巡ではなく、一定回数のoptimizer更新です。** `steps_per_epoch: null`なら、`ceil(trainの窓数 / 実効グローバルバッチ)`を更新回数にします。明示的に`steps_per_epoch`を設定することもできます。全rankが同じ更新回数を実行するため、データ終了時刻の違いでDDPが待ち続けることを避けられます。
 
 既定の`video_balanced: true`では、窓の多い長尺動画が学習を支配しないように、窓のlossへ`全窓数 / (全動画数 × その動画の窓数)`を掛けます。これは動画の寄与を揃えるもので、クラスの件数を揃える設定ではありません。`false`では窓を均等に扱います。
