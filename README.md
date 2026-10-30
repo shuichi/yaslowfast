@@ -349,6 +349,48 @@ yaslowfast-train --config configs/slowfast_r50.yaml \
 
 ## 評価と動画推論
 
+### 分類済みの動画tarから混同行列を算出
+
+positive・negativeに分類済みの動画tarを直接指定して、任意のチェックポイントを評価できます。リポジトリ直下から実行します。
+
+```sh
+yaslowfast-evaluate \
+  --checkpoint runs/h100x8/best.pt \
+  --positive data/eval_positive.tar \
+  --negative data/eval_negative.tar \
+  --device cuda \
+  --batch-size 8 \
+  --output results/best-evaluation.json \
+  --report reports/best-evaluation
+```
+
+`--positive`と`--negative`は両方指定します。各tarに含まれる対応形式の動画をすべて評価し、train／val／testへの再分割は行いません。macOSの`._*`・`__MACOSX`やCSVなどの動画以外のファイルは読み飛ばします。`data/eval_positive.tar`と`data/eval_negative.tar`は各100動画です。各1動画の`positive_sample.tar`／`negative_sample.tar`は動作確認向けです。
+
+チェックポイントのモデル構成、fps、JPEG品質、窓長・stride、評価時のリサイズ・中央クロップ、学習時のmean/stdをそのまま使用します。元の学習データセットが手元になくても実行できます。クラス名は`positive`と`negative`が必要ですが、IDはチェックポイントの`class_to_idx`から取得するため、IDの並びが逆の既存モデルも評価できます。
+
+各時間窓のsoftmax確率を動画ごとに平均し、最大確率のクラスを予測とします。同率ならID 0を選びます。**動画1本を1件**として集計するため、長い動画も混同行列に二重加算されません。Accuracy、Balanced Accuracy、Macro F1、各クラスのPrecision／Recall／F1と件数、混同行列をコンソールへ表示します。positiveを陽性とし、表示順はpositive、negativeです。
+
+| 正解 ＼ 予測 | positive | negative |
+|---|---|---|
+| positive | TP | FN |
+| negative | FP | TN |
+
+行が正解、列が予測です。JSONの`confusion_matrix`と確率配列は従来どおり**クラスID順**なので、読み取る際は`class_to_idx`を参照してください。分母が0になるPrecision／Recall／F1は0として扱います。`loss`／`window_loss`は実際の各窓のlogitsから計算したcross entropy、`video_loss`は動画平均確率から計算します。コンソールの先頭行には従来の要約JSONも出力します。動画ごとの進捗は標準エラー出力です。
+
+`--report DIR`を指定すると、次のファイルを生成します。
+
+- `DIR/index.html`: 日本語のHTMLレポート。色付きの混同行列（件数・行ごとの割合）、主要指標、誤分類・全動画の詳細、入力・チェックポイント・前処理・実行条件を表示します。ブラウザで直接開くことができ、インターネット接続やWebサーバーは不要です。
+- `DIR/metrics.json`: 指標と動画ごとの予測結果を含む評価データ。
+- `DIR/predictions.csv`: 元tar、tar内の動画名、正解・予測・確率などの動画別一覧。
+
+レポートディレクトリは自動作成し、再実行時は同名のレポートファイルを更新します。`--report`を省略してもコンソールへ結果を表示し、`--output`のJSON（既定は`evaluation.json`）を保存します。HTMLには動画本体を埋め込まず、元tarとメンバー名で対象動画を識別します。
+
+tar直接評価は単一プロセスです。`--device auto`はCUDAが使えればCUDA、それ以外はCPUを選び、Apple SiliconのMPSは`--device mps`で明示指定します。既定の精度はFP32で、必要なら`--precision`を指定できます。`--batch-size`は1動画内の時間窓のバッチ数です。FFmpegが必要で、元動画と抽出JPEGは1動画ずつ一時保存・削除します。`--dataset`、`--split`、`--num-workers`、`--allow-preprocessing-mismatch`との併用や`torchrun`による分散実行はできません。
+
+空のtar、不正なtar構造、内容が重複した動画、デコードできない動画、不正なモデル出力はエラーにし、動画を黙って除外した部分評価は出力しません。低い精度そのものは実行エラーにせず、指標として報告します。汎化性能の評価には、学習やチェックポイント選択に使用していない動画を用意してください。入力tar間の内容重複は検査しますが、過去の学習データとの重複は自動検査しません。
+
+### 前処理済みデータセットの評価と動画推論
+
 WebDatasetの評価:
 
 ```sh
@@ -361,6 +403,8 @@ yaslowfast-evaluate \
 ```
 
 testが空の場合は`--split val`を使用します。`--batch-size`と`--num-workers`は評価時だけ変更できます。複数GPUでの評価も、`torchrun ... -m yaslowfast.evaluate`に同じ引数を渡して実行できます。
+
+この方式でも混同行列をコンソールに表示し、`--report DIR`でHTML・JSON・CSVレポートを生成できます。分散実行時のファイル出力はrank 0のみです。
 
 評価は全窓を有限・重複なしで分配し、末尾バッチを落としません。rankごとに窓数が異なる場合や、担当shardがないrankにも対応します。各窓のsoftmax確率を元動画ごとに平均し、動画1本を1件としてAccuracy、macro F1、balanced accuracy、混同行列を計算します。`loss`／`window_loss`は窓単位の無重みcross entropy、`video_loss`は動画ごとに確率を平均した後の負の対数尤度です。
 

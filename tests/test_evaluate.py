@@ -244,10 +244,26 @@ def test_predict_and_eval_cli_share_video_preprocessing(tmp_path):
         checkpoint,
     )
     output = tmp_path / "evaluation.json"
-    evaluate_main(["--checkpoint", str(checkpoint), "--output", str(output), "--device", "cpu"])
+    report_directory = tmp_path / "report"
+    evaluate_main(
+        [
+            "--checkpoint",
+            str(checkpoint),
+            "--output",
+            str(output),
+            "--device",
+            "cpu",
+            "--report",
+            str(report_directory),
+        ]
+    )
     saved = json.loads(output.read_text())
     assert saved["num_windows"] == saved["num_videos"] == 1
     assert saved["preprocessing_mismatch"] == {}
+    assert saved["mode"] == "dataset"
+    assert saved["predictions"][0]["source"] == str(tmp_path / "motion.mp4")
+    assert json.loads((report_directory / "metrics.json").read_text()) == saved
+    assert "motion.mp4" in (report_directory / "index.html").read_text()
 
     metadata["preprocessing"]["fps"] = 8
     dataset_path.write_text(json.dumps(metadata))

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import tempfile
 import time
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +14,7 @@ import torch
 from .evaluate import write_json
 from .labels import NUM_CLASSES, validate_class_to_idx
 from .precision import autocast_context, resolve_precision
+from .video import iter_video_batches
 
 
 def predict_video(
@@ -29,9 +30,6 @@ def predict_video(
     return_windows: bool = False,
 ) -> dict[str, Any]:
     """Apply the exact stored window policy, then average window probabilities."""
-    from .data import transform_frames
-    from .prepare import extract_frames, window_frame_indices
-
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
     validate_class_to_idx(class_to_idx, context="Prediction class_to_idx")
@@ -52,53 +50,29 @@ def predict_video(
     previous_training = model.training
     model.eval()
     try:
-        with tempfile.TemporaryDirectory(prefix="yaslowfast-predict-") as directory:
-            frames = extract_frames(
-                video_path,
-                Path(directory) / "frames",
-                fps=preprocessing["fps"],
-                short_side=preprocessing["short_side"],
-                jpeg_quality=preprocessing["jpeg_quality"],
-            )
-            if not frames:
-                raise ValueError(f"Video produced no frames: {video_path}")
-            indices = window_frame_indices(
-                len(frames), preprocessing["window_frames"], preprocessing["window_stride"]
-            )
-            with torch.inference_mode():
-                for offset in range(0, len(indices), batch_size):
-                    index_batch = indices[offset : offset + batch_size]
-                    pairs = [
-                        transform_frames(
-                            [frames[index] for index in frame_indices[:valid]],
-                            config=config.data,
-                            model_config=config.model,
-                            training=False,
-                        )
-                        for _, frame_indices, valid in index_batch
-                    ]
-                    slow = torch.stack([pair[0] for pair in pairs]).to(device)
-                    fast = torch.stack([pair[1] for pair in pairs]).to(device)
-                    with autocast_context(device, precision):
-                        logits = model(slow, fast)
-                    if logits.shape != (len(index_batch), NUM_CLASSES):
-                        raise ValueError(f"Unexpected model output shape: {tuple(logits.shape)}")
-                    probabilities = logits.float().softmax(dim=1).cpu().double()
-                    if not torch.isfinite(probabilities).all():
-                        raise ValueError("Model produced non-finite probabilities")
-                    probability_sum += probabilities.sum(dim=0)
-                    count += len(index_batch)
-                    if return_windows:
-                        for (start, _, valid), probability in zip(
-                            index_batch, probabilities, strict=True
-                        ):
-                            windows.append(
-                                {
-                                    "start_seconds": start / preprocessing["fps"],
-                                    "valid_frames": valid,
-                                    "probabilities": probability.tolist(),
-                                }
-                            )
+        with (
+            closing(
+                iter_video_batches(
+                    video_path, config=config, preprocessing=preprocessing, batch_size=batch_size
+                )
+            ) as batches,
+            torch.inference_mode(),
+        ):
+            for batch in batches:
+                slow = batch["slow"].to(device)
+                fast = batch["fast"].to(device)
+                with autocast_context(device, precision):
+                    logits = model(slow, fast)
+                if logits.shape != (len(batch["windows"]), NUM_CLASSES):
+                    raise ValueError(f"Unexpected model output shape: {tuple(logits.shape)}")
+                probabilities = logits.float().softmax(dim=1).cpu().double()
+                if not torch.isfinite(probabilities).all():
+                    raise ValueError("Model produced non-finite probabilities")
+                probability_sum += probabilities.sum(dim=0)
+                count += len(batch["windows"])
+                if return_windows:
+                    for window, probability in zip(batch["windows"], probabilities, strict=True):
+                        windows.append({**window, "probabilities": probability.tolist()})
         if count == 0:
             raise ValueError("Video produced no evaluation windows")
         probabilities = probability_sum / count

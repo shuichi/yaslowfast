@@ -41,6 +41,7 @@ htmlcov/
 /datasets/
 /runs/
 /results/
+/reports/
 /exports/
 *.pt
 *.pth
